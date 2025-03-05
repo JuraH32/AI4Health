@@ -15,6 +15,8 @@ class MedicalImageDataset(Dataset):
             train (bool, optional): Whether the dataset is for training.
         """
         self.metadata = pd.read_csv(csv_path)
+        if train:
+            self.metadata = self.metadata.dropna(subset=['BIRADS'])
         self.root_dir = root_dir
         self.transform = transform
         self.train = train
@@ -26,8 +28,8 @@ class MedicalImageDataset(Dataset):
         row = self.metadata.iloc[idx]
         patient_id = row['patient_id']
         image_id = row['image_id']
-        # Construct the full image path: "train_images/{patient_id}/{image_id}"
-        image_path = os.path.join(self.root_dir, str(patient_id), str(image_id))
+        # Construct the full image path: "train_images/{patient_id}/{image_id}.jpg"
+        image_path = os.path.join(self.root_dir, str(patient_id), f"{str(image_id)}.jpg")
         image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
         if image is None:
             raise ValueError(f"Image not found at path: {image_path}")
@@ -35,7 +37,7 @@ class MedicalImageDataset(Dataset):
             image = self.transform(image)
         # For training, assume the 'cancer' column exists as the target label.
         if self.train:
-            target = row['cancer']
+            target = row['BIRADS']
             return image, target
         return image
 
