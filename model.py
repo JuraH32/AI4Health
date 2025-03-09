@@ -3,47 +3,25 @@ import torch
 import timm
 
 class SwinTransformerClassificationModel(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes=3, in_channels=1, trainable=True):
         super(SwinTransformerClassificationModel, self).__init__()
-        self.model = timm.create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=num_classes, global_pool='avg')
-        old_proj = self.model.patch_embed.proj  # original conv layer
-        self.model.patch_embed.proj = nn.Conv2d(
-            in_channels=1,
-            out_channels=old_proj.out_channels,
-            kernel_size=old_proj.kernel_size,
-            stride=old_proj.stride,
-            padding=old_proj.padding,
-            bias=old_proj.bias is not None
-        )
+        self.model = timm.create_model('swin_base_patch4_window7_224', pretrained=True, num_classes=num_classes, global_pool='avg', in_chans=in_channels)
+        
+        if not trainable:
+            for param in self.model.parameters():
+                param.requires_grad = False
+        else:
+            for param in self.model.parameters():
+                param.requires_grad = True
 
     def forward(self, x):
-        out = self.model(x)
-        return out
+        return self.model(x)
     
 class SwinMammoClassifier(nn.Module):
-    def __init__(self, embed_dim=1024, num_classes=2):
+    def __init__(self, embed_dim=1024, num_classes=3, in_channels=1):
         super(SwinMammoClassifier, self).__init__()
-        self.swin1 = timm.create_model("swin_base_patch4_window7_224", pretrained=True, num_classes=0)
-        old_proj = self.swin1.patch_embed.proj
-        self.swin1.patch_embed.proj = nn.Conv2d(
-            in_channels=1,
-            out_channels=old_proj.out_channels,
-            kernel_size=old_proj.kernel_size,
-            stride=old_proj.stride,
-            padding=old_proj.padding,
-            bias=old_proj.bias is not None
-        )
-        
-        self.swin2 = timm.create_model("swin_base_patch4_window7_224", pretrained=True, num_classes=0)
-        old_proj = self.swin2.patch_embed.proj
-        self.swin2.patch_embed.proj = nn.Conv2d(
-            in_channels=1,
-            out_channels=old_proj.out_channels,
-            kernel_size=old_proj.kernel_size,
-            stride=old_proj.stride,
-            padding=old_proj.padding,
-            bias=old_proj.bias is not None
-        )
+        self.swin1 = timm.create_model("swin_base_patch4_window7_224", pretrained=True, in_chans=in_channels)       
+        self.swin2 = timm.create_model("swin_base_patch4_window7_224", pretrained=True, in_chans=in_channels)
         
         # Ensure full training: set requires_grad True for all parameters in the backbone.
         for param in self.swin1.parameters():
@@ -84,11 +62,112 @@ class SwinMammoClassifier(nn.Module):
 
 
 class ConvNeXtClassificationModel(nn.Module):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes=3, in_channels=1):
         super(ConvNeXtClassificationModel, self).__init__()
-        self.model = timm.create_model('convnext_base', pretrained=True)
-        in_features = self.model.head.fc.in_features
-        self.model.head.fc = nn.Linear(in_features, num_classes)
+        self.model = timm.create_model('convnextv2_tiny.fcmae_ft_in22k_in1k_384', pretrained=True, num_classes=num_classes, global_pool='avg', in_chans=in_channels)
+        
+        # Make sure all parameters are trainable.
+        for param in self.model.parameters():
+            param.requires_grad = True
+        
 
     def forward(self, x):
         return self.model(x)
+
+class LeisureDetectionModel(nn.Module):
+    def __init__(self, backbone_cls, backbone_kwargs={}, head_type="simple", detector_type="custom", **detector_kwargs):
+        super(LeisureDetectionModel, self).__init__()
+        # Initialize backbone using provided classification model.
+        self.backbone = backbone_cls(**backbone_kwargs)
+        backbone_model = self.backbone.model if hasattr(self.backbone, 'model') else self.backbone
+        
+        # Remove the classifier head and pooling.
+        if hasattr(backbone_model, 'reset_classifier'):
+            backbone_model.reset_classifier(0)
+        if hasattr(backbone_model, 'global_pool'):
+            backbone_model.global_pool = nn.Identity()
+            
+        # Determine feature dimension.
+        in_channels = getattr(backbone_model, 'num_features', 1024)
+        self.detector_type = detector_type
+
+        if detector_type == "custom":
+            # Detection head architectures.
+            if head_type == "simple":
+                self.bbox_regressor = nn.Conv2d(in_channels, 4, kernel_size=1)
+                self.classifier = nn.Conv2d(in_channels, 1, kernel_size=1)
+            elif head_type == "fcn":
+                self.bbox_regressor = nn.Sequential(
+                    nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv2d(in_channels, 4, kernel_size=1)
+                )
+                self.classifier = nn.Sequential(
+                    nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+                    nn.ReLU(),
+                    nn.Conv2d(in_channels, 1, kernel_size=1)
+                )
+            elif head_type == "custom":
+                reduced_channels = in_channels // 2
+                self.bbox_regressor = nn.Sequential(
+                    nn.Conv2d(in_channels, reduced_channels, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(reduced_channels),
+                    nn.ReLU(),
+                    nn.Conv2d(reduced_channels, reduced_channels, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(reduced_channels),
+                    nn.ReLU(),
+                    nn.Conv2d(reduced_channels, 4, kernel_size=1)
+                )
+                self.classifier = nn.Sequential(
+                    nn.Conv2d(in_channels, reduced_channels, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(reduced_channels),
+                    nn.ReLU(),
+                    nn.Conv2d(reduced_channels, reduced_channels, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(reduced_channels),
+                    nn.ReLU(),
+                    nn.Conv2d(reduced_channels, 1, kernel_size=1)
+                )
+            else:
+                raise ValueError(f"Unknown head_type: {head_type}")
+        elif detector_type in ["fasterrcnn", "retinanet", "efficientdet", "yolo"]:
+            # Wrap the backbone to return a dict with key "0"
+            class CustomBackboneWrapper(nn.Module):
+                def __init__(self, backbone, out_channels):
+                    super(CustomBackboneWrapper, self).__init__()
+                    self.backbone = backbone
+                    self.out_channels = out_channels
+                def forward(self, x):
+                    features = self.backbone(x)
+                    return {"0": features}
+            self.custom_backbone = CustomBackboneWrapper(backbone_model, in_channels)
+            if detector_type == "fasterrcnn":
+                from torchvision.models.detection.faster_rcnn import FasterRCNN
+                num_classes = detector_kwargs.get("num_classes", 3)
+                self.detector = FasterRCNN(self.custom_backbone, num_classes=num_classes)
+            elif detector_type == "retinanet":
+                from torchvision.models.detection.retinanet import RetinaNet
+                num_classes = detector_kwargs.get("num_classes", 3)
+                self.detector = RetinaNet(self.custom_backbone, num_classes=num_classes)
+            elif detector_type == "efficientdet":
+                from efficientdet_pytorch import EfficientDet
+                num_classes = detector_kwargs.get("num_classes", 3)
+                self.detector = EfficientDet(self.custom_backbone, num_classes=num_classes)
+            elif detector_type == "yolo":
+                from yolov5 import YOLOv5
+                num_classes = detector_kwargs.get("num_classes", 3)
+                self.detector = YOLOv5(self.custom_backbone, num_classes=num_classes)
+        else:
+            raise ValueError(f"Unknown detector_type: {detector_type}")
+
+    def forward(self, x):
+        if self.detector_type == "custom":
+            if hasattr(self.backbone, 'model'):
+                features = self.backbone.model(x)
+            else:
+                features = self.backbone(x)
+            bbox = self.bbox_regressor(features)
+            score = self.classifier(features)
+            return bbox, score
+        else:
+            return self.detector(x)
+
